@@ -10,8 +10,10 @@ let users = [];
 let adminSocketId = null;
 
 io.on('connection', (socket) => {
+    // Sync Admin presence to new connections
     socket.emit('status_update', { admin_present: !!adminSocketId });
 
+    // 1. Admin Claim Logic
     socket.on('claim_admin', (data) => {
         if (!adminSocketId && data.key === process.env.ADMIN_SECRET_KEY) {
             adminSocketId = socket.id;
@@ -20,12 +22,14 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 2. Registration Logic (Viewer/Ghost)
     socket.on('register_user', (data) => {
+        // Store name in lowercase for easier matching
         users.push({ id: socket.id, name: data.name.toLowerCase().trim(), role: data.role });
         io.emit('update_list', users);
     });
 
-    // --- TERMINATION LOGIC ---
+    // 3. Admin "Uninstall" (Kick) Logic
     socket.on('admin_kick_user', (targetId) => {
         if (socket.id === adminSocketId) {
             io.to(targetId).emit('forced_disconnect', { reason: 'MASTER TERMINATED SESSION' });
