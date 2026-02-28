@@ -1,7 +1,7 @@
 {
   "name": "joyjet-server",
   "version": "1.1.0",
-  "description": "Ghost System Backend",
+  "description": "Joyjet Ghost System Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
