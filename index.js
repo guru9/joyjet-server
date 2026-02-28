@@ -4,47 +4,53 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { 
+    cors: { origin: "*" },
+    pingTimeout: 60000 
+});
 
-let users = []; 
-let adminSocketId = null;
+let state = { adminId: null, viewers: new Set(), ghosts: {} };
 
 io.on('connection', (socket) => {
-    // Sync Admin presence to new connections
-    socket.emit('status_update', { admin_present: !!adminSocketId });
+    socket.emit('status_update', { admin_present: !!state.adminId });
 
-    // 1. Admin Claim Logic
     socket.on('claim_admin', (data) => {
-        if (!adminSocketId && data.key === process.env.ADMIN_SECRET_KEY) {
-            adminSocketId = socket.id;
+        if (!state.adminId) {
+            state.adminId = socket.id;
             socket.emit('role_assigned', { role: 'MASTER' });
             io.emit('status_update', { admin_present: true });
+        } else {
+            socket.emit('forced_disconnect', { reason: "Hub Occupied" });
         }
     });
 
-    // 2. Registration Logic (Viewer/Ghost)
-    socket.on('register_user', (data) => {
-        // Store name in lowercase for easier matching
-        users.push({ id: socket.id, name: data.name.toLowerCase().trim(), role: data.role });
-        io.emit('update_list', users);
+    socket.on('register_user', ({ name, role, netType }) => {
+        if (role === 'VIEWER') {
+            if (state.viewers.size >= 3) return socket.emit('forced_disconnect', { reason: "Slots Full" });
+            state.viewers.add(socket.id);
+        }
+        if (role === 'GHOST') state.ghosts[socket.id] = { name, netType };
+        socket.emit('role_assigned', { role });
     });
 
-    // 3. Admin "Uninstall" (Kick) Logic
-    socket.on('admin_kick_user', (targetId) => {
-        if (socket.id === adminSocketId) {
-            io.to(targetId).emit('forced_disconnect', { reason: 'MASTER TERMINATED SESSION' });
+    socket.on('screen_frame', (frame) => socket.volatile.broadcast.emit('stream', frame));
+    
+    socket.on('admin_command', (cmd) => {
+        socket.broadcast.emit('admin_command', cmd);
+        if (cmd === 'START_LIVE') {
+            // Cellular Governor: Force ECO after 5 mins
+            setTimeout(() => io.emit('admin_command', 'START_ECO'), 300000);
         }
     });
 
     socket.on('disconnect', () => {
-        if (socket.id === adminSocketId) {
-            adminSocketId = null;
+        if (socket.id === state.adminId) {
+            state.adminId = null;
             io.emit('status_update', { admin_present: false });
         }
-        users = users.filter(u => u.id !== socket.id);
-        io.emit('update_list', users);
+        state.viewers.delete(socket.id);
+        delete state.ghosts[socket.id];
     });
 });
 
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`JoyJet Hub active on port ${PORT}`));
+server.listen(process.env.PORT || 10000, '0.0.0.0');
