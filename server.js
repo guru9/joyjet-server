@@ -18,7 +18,7 @@ const io = new Server(server, {
 
 // 2. SECURITY & CONFIG
 const PUBLIC_URL = "https://joyjet-server.onrender.com";
-const ADMIN_KEY = process.env.ADMIN_SECRET_KEY || "GURU_8310"; 
+const ADMIN_KEY = process.env.ADMIN_SECRET_KEY; 
 let viewers = new Map(); // Tracks active viewer sessions
 
 // 3. RENDER KEEP-ALIVE (Self-Heartbeat)
